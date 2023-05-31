@@ -1,25 +1,5 @@
 /*==================================================================================================
-*   Project              : BMS SDK AUTOSAR 4.4
-*   Platform             : CORTEXM
-*   Peripheral           : 
-*   Dependencies         : Phy_665a
-*
-*   Autosar Version      : 4.4.0
-*   Autosar Revision     : ASR_REL_4_4_REV_0000
-*   Autosar Conf.Variant :
-*   SW Version           : 1.0.0
-*   Build Version        : S32K3_BMS_SDK_1_0_0_D2304_ASR_REL_4_4_REV_0000_20230413
-*
-*   (c) Copyright 2020 - 2023 NXP Semiconductors
-*   All Rights Reserved.
-*
-*   NXP Confidential. This software is owned or controlled by NXP and may only be
-*   used strictly in accordance with the applicable license terms. By expressly
-*   accepting such terms or by downloading, installing, activating and/or otherwise
-*   using the software, you are agreeing that you have read, and that you agree to
-*   comply with and are bound by, such license terms. If you do not agree to be
-*   bound by the applicable license terms, then you may not retain, install,
-*   activate or otherwise use the software.
+*   Project              : LVBMS
 ==================================================================================================*/
 
 #ifdef __cplusplus
@@ -29,9 +9,6 @@ extern "C"{
 
 /*==================================================================================================
  *                                        INCLUDE FILES
- * 1) system and project includes
- * 2) needed interfaces from external units
- * 3) internal and external interfaces from this unit
 ==================================================================================================*/
 
 /* Including necessary configuration files. */
@@ -40,14 +17,22 @@ extern "C"{
 #include "Platform.h"
 #include "Port.h"
 #include "Dio.h"
+#include "Icu.h"
+#include "Uart.h"
 #include "CDD_Bms_SpiIf.h"
 #include "CDD_Bms_common_Types.h"
 #include "CDD_Bms_Common.h"
 #include "CDD_Bcc_772c.h"
+
+/* Including FreeRTOS*/
 #include "FreeRTOS.h"
 #include "task.h"
-#include "queue.h"
-#include <stdio.h>
+#include "semphr.h"
+
+/* Including FreeMASTER Driver */
+#include "freemaster.h"
+#include "freemaster_cfg.h"
+#include "freemaster_s32k3xx_lpuart.h"
 
 #ifndef LVBMS_H
 #define LVBMS_H
@@ -59,8 +44,29 @@ extern "C"{
 /*==================================================================================================
  *                                      DEFINES AND MACROS
  ==================================================================================================*/
-#define SPI_BCC_CHAIN_ADDR		1U
-#define SPI_BCC_DEVICE_ADDR		1U
+#define SPI_BCC_CHAIN_ADDR		        1U        /*Chain allocated for Battery Cell Controller*/
+#define SPI_BCC_DEVICE_ADDR		        1U        /*Device address allocated for Battery Cell Controller*/
+
+#define ACTIVE_CELL_NUMBER              6U        /*Number of cell used by the LVBMS (max: 6)*/
+#define VMIN                            15        /*Minimum allowed stack voltage*/
+#define VMAX                            24        /*Maximum recomended stack voltage*/
+#define IMIN                            100       /*Current value when fully charged*/
+#define RSHUNT					        10000U    /* Shunt resistor value in uOhm*/
+#define VCT_ANX_RES                     152.58789 /*Resolution used for voltage measurements in uV/LSB*/
+#define VPRW_RES                        2.44148   /*Resolution used for stack voltage measurements in mV/LSB*/
+#define C_RATED                         15000U    /*Maximal capacity of the battery pack in mAh*/
+#define MAX_VOLTAGE_DIFF                0.8       /*Maximal allowed cell voltage difference*/
+#define CHARGE_OPERATING_EFFICIENCY     1.0
+#define DISCHARGE_OPERATING_EFFICIENCY  1.0
+
+#define CELL_VOLTAGE_VALUE(x)        ((x & 0x7fff) * VCT_ANX_RES / 1000000U)
+#define STACK_VOLTAGE_VALUE(x)       ((x & 0x7fff) * VPRW_RES / 1000U)
+#define DELAY(x)                	 (x / portTICK_PERIOD_MS)
+
+/*Delay in ms*/
+#define MEASUREMENTS_DELAY      DELAY(5U)
+#define FAULT_HANDLER_DELAY     DELAY(100U)
+#define LED_FAULT_DELAY         DELAY(300U)
 /*==================================================================================================
  *                                            ENUMS
  ==================================================================================================*/
@@ -72,21 +78,44 @@ typedef enum
     ERROR_ENUMERATE,
     ERROR_CONFIGURE
 } LVBMS_Error;
+
+typedef enum
+{
+	NO_FAULT = 0U,
+	FAULT
+}LVBMS_FaultStatus;
+
+typedef enum
+{
+	IDLE = 0U,
+	CHARGING,
+    DISCHARGING
+}LVBMS_State;
+
+typedef enum
+{
+    CELL_OK = 0U,
+    CELL_OV,
+    CELL_UV,
+}LVBMS_CellFaultStatus;
 /*==================================================================================================
  *                                STRUCTURES AND OTHER TYPEDEFS
  ==================================================================================================*/
 typedef struct
 {
+    LVBMS_CellFaultStatus CTState[ACTIVE_CELL_NUMBER];
+    uint8 CTBalEnabled[ACTIVE_CELL_NUMBER];
+}LVBMS_CellState;
+
+typedef struct
+{
     float Current;
     float StackVoltage;
-    float CT1Voltage;
-    float CT2Voltage;
-    float CT3Voltage;
-    float CT4Voltage;
-    float CT5Voltage;
-    float CT6Voltage;
+    float CTVoltage[ACTIVE_CELL_NUMBER];
     float PackTemperature;
+    float DeltaQ;
 } LVBMS_Measurements;
+
 /*==================================================================================================
  *                                GLOBAL VARIABLE DECLARATIONS
  ==================================================================================================*/
@@ -98,11 +127,15 @@ void LVBMS_Init(void);
 LVBMS_Error LVBMS_SystemConfig(void);
 Std_ReturnType LVBMS_StartMeasurements(void);
 Std_ReturnType LVBMS_ReadMeasurements(LVBMS_Measurements* Measurements);
-void TD_Wait(const Bms_TDType* MessageTD);
+LVBMS_FaultStatus LVBMS_CheckFault(void);
+Std_ReturnType LVBMS_ClearFault(void);
+void LVBMS_CellBalanceControl(void);
+
+void FaultEvent(void);
 
 /*LVBMS tasks*/
 void LVBMS_MeasureTask(void* parameters);
-void LVBMS_DashboardTask(void* parameters);
+void LVBMS_ControlTask(void* parameters);
 void LVBMS_FaultHandlerTask(void* parameters);
 
 #ifdef __cplusplus
